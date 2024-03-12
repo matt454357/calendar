@@ -8,6 +8,7 @@
                 <group>
                     <field name="import_start_date" />
                     <field name="import_end_date" />
+                    <field name="partner_id" />
                     <field name="do_remove_old_event" />
                     <field name="import_ics_file" filename="import_ics_filename" />
                 </group>

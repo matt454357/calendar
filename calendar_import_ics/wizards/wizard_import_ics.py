@@ -3,6 +3,8 @@
 
 import base64
 from datetime import datetime
+import icalendar
+import re
 
 from odoo import _, fields, models
 from odoo.exceptions import ValidationError
@@ -29,7 +31,7 @@ class CalendarImportIcs(models.TransientModel):
     )
 
     def button_import(self):
-        imported_events = []
+        imported_uids = []
         self.ensure_one()
         assert self.import_ics_file
         extension = self.import_ics_filename.split(".")[1]
@@ -39,64 +41,64 @@ class CalendarImportIcs(models.TransientModel):
             self.partner_id = self.env.user.partner_id.id
         file_decoded = base64.b64decode(self.import_ics_file)
         file_str = file_decoded.decode("utf-8")
-        lines = file_str.split("\n")
-        ics_event = {}
-        for line in lines:
-            if line.startswith("BEGIN:VEVENT"):
-                ics_event = {}
-            elif line.startswith("END:VEVENT"):
-                self._process_event(ics_event, imported_events)
-            else:
-                if ":" in line:
-                    key, value = line.strip().split(":", 1)
-                    ics_event[key] = value
-        if self.do_remove_old_event:
-            self._delete_non_imported_events(imported_events)
 
-    def _process_event(self, ics_event, imported_events):
-        if "DTSTART" in ics_event and "DTEND" in ics_event:
-            event_start_date = self._parse_date(ics_event["DTSTART"])
-            event_end_date = self._parse_date(ics_event["DTEND"])
+        calendar = icalendar.Calendar.from_ical(file_str)
+        for event in calendar.walk('VEVENT'):
+            start_date = event.get("DTSTART") and event.decoded("DTSTART")
+            end_date = event.get("DTEND") and event.decoded("DTEND")
+            if not start_date or not end_date:
+                continue
             if (not self.import_start_date or not self.import_end_date) or (
-                self.import_start_date <= event_start_date.date()
-                and self.import_end_date >= event_end_date.date()
+                self.import_start_date <= start_date.date()
+                and self.import_end_date >= end_date.date()
             ):
-                imported_events.append(ics_event["UID"])
-                event = self.env["calendar.event"].search(
-                    [("event_identifier", "=", ics_event["UID"])]
+                vals = self._prepare_event_vals(event)
+                imported_uids.append(vals["event_identifier"])
+                existing_event = self.env["calendar.event"].search(
+                    [("event_identifier", "=", vals["event_identifier"])]
                 )
-                if event:
-                    self._update_event(
-                        event, ics_event, event_start_date, event_end_date
-                    )
+                if existing_event:
+                    self._update_event(existing_event, vals)
                 else:
-                    self._create_event(ics_event, event_start_date, event_end_date)
+                    self._create_event(vals)
 
-    def _parse_date(self, date_str):
-        return datetime.strptime(date_str, "%Y%m%dT%H%M%SZ")
+        if self.do_remove_old_event:
+            self._delete_non_imported_events(imported_uids)
 
-    def _update_event(self, event, ics_event, event_start_date, event_end_date):
-        vals = {}
-        if event.start != event_start_date:
-            vals["start"] = event_start_date
-        if event.stop != event_end_date:
-            vals["stop"] = event_end_date
-        if event.name != ics_event["SUMMARY"]:
-            vals["name"] = ics_event["SUMMARY"]
+    def _prepare_event_vals(self, ical_event):
+        vals = {
+            "start": ical_event.decoded("DTSTART").strftime("%Y-%m-%d %H:%M:00"),
+            "stop": ical_event.decoded("DTEND").strftime("%Y-%m-%d %H:%M:00"),
+            "name": ical_event.decoded("SUMMARY").decode("UTF-8"),
+            "event_identifier": ical_event.decoded("UID").decode("UTF-8"),
+            "partner_ids": [(4, self.partner_id.id)],
+        }
+        if ical_event.get("DESCRIPTION"):
+            desc = ical_event.decoded("DESCRIPTION").decode("UTF-8")
+            vals['description'] = "<p>" + desc.replace('\n', '<br>') + "</p>"
+            m = re.findall(r"^Address: (.+)$", desc, re.MULTILINE)
+            if len(m) == 1:
+                vals['location'] = m[0]
+        return vals
+
+    def _update_event(self, event, vals):
+        update_vals = {}
+        if event.start != vals["start"]:
+            update_vals["start"] = vals["start"]
+        if event.stop != vals["stop"]:
+            update_vals["stop"] = vals["stop"]
+        if event.name != vals["name"]:
+            update_vals["name"] = vals["name"]
         if self.partner_id not in event.partner_ids:
-            vals["partner_ids"] = [(4, self.partner_id.id, 0)]
-        event.write(vals)
+            update_vals["partner_ids"] = [(4, self.partner_id.id, 0)]
+        if event.location != vals.get("location"):
+            update_vals["location"] = vals.get("location")
+        if event.description != vals.get("description"):
+            update_vals["description"] = vals.get("description")
+        event.write(update_vals)
 
-    def _create_event(self, ics_event, event_start_date, event_end_date):
-        self.env["calendar.event"].create(
-            {
-                "start": event_start_date,
-                "stop": event_end_date,
-                "name": ics_event["SUMMARY"],
-                "event_identifier": ics_event["UID"],
-                "partner_ids": [(4, self.partner_id.id)],
-            }
-        )
+    def _create_event(self, vals):
+        self.env["calendar.event"].create(vals)
 
     def _delete_non_imported_events(self, imported_events):
         domain = [
