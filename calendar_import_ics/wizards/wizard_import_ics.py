@@ -5,6 +5,7 @@ import base64
 from datetime import datetime
 import icalendar
 import re
+from odoo.tools import plaintext2html
 
 from odoo import _, fields, models
 from odoo.exceptions import ValidationError
@@ -75,7 +76,7 @@ class CalendarImportIcs(models.TransientModel):
         }
         if ical_event.get("DESCRIPTION"):
             desc = ical_event.decoded("DESCRIPTION").decode("UTF-8")
-            vals['description'] = "<p>" + desc.replace('\n', '<br>') + "</p>"
+            vals['description'] = plaintext2html(desc)
             m = re.findall(r"^Address: (.+)$", desc, re.MULTILINE)
             if len(m) == 1:
                 vals['location'] = m[0]
